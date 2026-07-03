@@ -31,6 +31,7 @@ app.listen(PORT, async () => {
       console.log('Database connection established successfully');
     } else {
       console.error('Failed to connect to database:', health.error);
+      process.exit(1);
     }
   } catch (error) {
     console.error('Database check failed:', error.message);
