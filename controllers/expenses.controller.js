@@ -4,6 +4,7 @@ const ExpenseTemplate = require('../models/expense-template.model');
 const Debt = require('../models/debts.model');
 const Month = require('../models/month.model');
 const Savings = require('../models/savings.model');
+const SavingsSettings = require('../models/savings-settings.model');
 const Income = require('../models/income.model');
 const { getOrCreateActiveMonth } = require('../services/month.service');
 
@@ -346,9 +347,17 @@ const recalculateMonthTotals = async (monthId) => {
     const total_income = Number(currentMonth.total_income) || 0;
     const balance_brought_forward = Number(currentMonth.balance_brought_forward) || 0;
 
-    // balance now includes whatever surplus rolled in from last cycle
-    const balance = total_income - total_expense - debt_cost + balance_brought_forward;
-    const money_saved = balance > 0 ? balance : 0;
+    // ✅ use existing model instead of raw SQL
+    const savingsSettings = await SavingsSettings.findByUserId(currentMonth.userId);
+    const savings_percentage = savingsSettings
+        ? Number(savingsSettings.savings_percentage)
+        : 0;
+
+    // money_saved = projected savings (income × savings%)
+    const money_saved = Number((total_income * savings_percentage / 100).toFixed(2));
+
+    // balance = income - expenses - debts - savings + brought forward
+    const balance = total_income - total_expense - debt_cost - money_saved + balance_brought_forward;
 
     await Month.updateTotals(monthId, {
         total_income,
@@ -361,7 +370,6 @@ const recalculateMonthTotals = async (monthId) => {
 
     return { total_income, total_expense, balance, debt_cost, money_saved, balance_brought_forward };
 };
-
 module.exports = {
     createExpense,
     getAllExpenses,
