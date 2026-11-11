@@ -501,7 +501,6 @@ const recalculateMonthTotals = async (monthId) => {
 
     return { total_income, total_expense, balance, debt_cost, money_saved, balance_brought_forward };
 };
-
 module.exports = {
     createExpense,
     getAllExpenses,
