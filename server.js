@@ -2,11 +2,11 @@ require("dotenv").config();
 const pool = require("./config/db");
 const app = require("./app");
 const PORT = process.env.PORT || 3000;
-//const { startSavingsLockJob, startSavingsUnlockJob } = require('./cronjobs/savingsLock');
+const { startSavingsLockJob, startSavingsUnlockJob } = require('./cronjobs/savingsLock');
 
-// start cron jobs
-//startSavingsLockJob();
-//startSavingsUnlockJob();
+
+startSavingsLockJob();
+startSavingsUnlockJob();
 
 async function checkDatabaseHealth() {
     try {

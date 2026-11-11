@@ -76,16 +76,27 @@ class GeneralSettings {
     }
 
     // update general preferences (currency, language, timezone, notifications)
-    static async updatePreferences(userId, { currency, language, timezone, notifications }) {
-        const [result] = await pool.execute(
-            `UPDATE general_settings 
-             SET currency = ?, language = ?, timezone = ?, notifications = ?
-             WHERE userId = ?`,
-            [currency, language, timezone, notifications, userId]
-        );
-        return result.affectedRows > 0;
-    }
-
+    static async updatePreferences(userId, { currency, language, timezone, notifications, expense_release_buffer_days }) {
+    const [result] = await pool.execute(
+        `UPDATE general_settings 
+         SET currency = ?, language = ?, timezone = ?, notifications = ?,
+             expense_release_buffer_days = ?
+         WHERE userId = ?`,
+        [
+            currency, language, timezone, notifications,
+            expense_release_buffer_days ?? 3,
+            userId
+        ]
+    );
+    return result.affectedRows > 0;
+}
+static async updateCycleStartDaySilent(userId, cycle_start_day) {
+    const [result] = await pool.execute(
+        'UPDATE general_settings SET cycle_start_day = ? WHERE userId = ?',
+        [cycle_start_day, userId]
+    );
+    return result.affectedRows > 0;
+}
     // check if user can change cycle_start_day
     static async canChangeCycle(userId) {
         const settings = await this.findByUserId(userId);

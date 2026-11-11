@@ -2,29 +2,49 @@ const pool = require('../config/db');
 
 class Debt {
 
-    // create debt — interest_rate fixed at 15%, repayment plan not set yet
-    static async create({ userId, monthId, debt_amount }) {
-        const interest_rate = 15; // fixed for now
-        const interest_amount = (debt_amount * interest_rate / 100).toFixed(2);
-        const total_payable = (Number(debt_amount) + Number(interest_amount)).toFixed(2);
+static async create({ userId, monthId, debt_amount, interest_rate = 15 }) {
+    // interest_rate now comes in dynamically from credit score
+    // defaults to 15% (fair) if no credit score exists yet
+    const interest_amount = (debt_amount * interest_rate / 100).toFixed(2);
+    const total_payable = (Number(debt_amount) + Number(interest_amount)).toFixed(2);
 
-        const [result] = await pool.execute(
-            `INSERT INTO debts (userId, monthId, debt_amount, interest_rate, interest_amount, total_payable, status)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            [userId, monthId, debt_amount, interest_rate, interest_amount, total_payable, 'pending']
-        );
+    const [result] = await pool.execute(
+        `INSERT INTO debts (userId, monthId, debt_amount, interest_rate, interest_amount, total_payable, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [userId, monthId, debt_amount, interest_rate, interest_amount, total_payable, 'pending']
+    );
 
-        return {
-            id: result.insertId,
-            userId,
-            monthId,
-            debt_amount,
-            interest_rate,
-            interest_amount: Number(interest_amount),
-            total_payable: Number(total_payable),
-            status: 'pending'
-        };
-    }
+    return {
+        id: result.insertId,
+        userId, monthId, debt_amount,
+        interest_rate,
+        interest_amount: Number(interest_amount),
+        total_payable: Number(total_payable),
+        status: 'pending'
+    };
+}
+    // static async create({ userId, monthId, debt_amount }) {
+    //     const interest_rate = 15; // fixed for now
+    //     const interest_amount = (debt_amount * interest_rate / 100).toFixed(2);
+    //     const total_payable = (Number(debt_amount) + Number(interest_amount)).toFixed(2);
+
+    //     const [result] = await pool.execute(
+    //         `INSERT INTO debts (userId, monthId, debt_amount, interest_rate, interest_amount, total_payable, status)
+    //          VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    //         [userId, monthId, debt_amount, interest_rate, interest_amount, total_payable, 'pending']
+    //     );
+
+    //     return {
+    //         id: result.insertId,
+    //         userId,
+    //         monthId,
+    //         debt_amount,
+    //         interest_rate,
+    //         interest_amount: Number(interest_amount),
+    //         total_payable: Number(total_payable),
+    //         status: 'pending'
+    //     };
+    // }
 
     static async findById(id) {
         const [rows] = await pool.execute('SELECT * FROM debts WHERE id = ?', [id]);
@@ -36,7 +56,15 @@ class Debt {
             'SELECT * FROM debts WHERE userId = ? ORDER BY created_at DESC',
             [userId]
         );
-        return rows;
+        return rows.map(row => ({
+        ...row,
+        debt_amount: Number(row.debt_amount),
+        interest_rate: Number(row.interest_rate),
+        interest_amount: Number(row.interest_amount),
+        total_payable: Number(row.total_payable),
+        monthly_principal: Number(row.monthly_principal),
+        monthly_interest: Number(row.monthly_interest)
+    }));
     }
 
     static async findByMonthId(monthId) {
@@ -44,7 +72,15 @@ class Debt {
             'SELECT * FROM debts WHERE monthId = ?',
             [monthId]
         );
-        return rows;
+       return rows.map(row => ({
+        ...row,
+        debt_amount: Number(row.debt_amount),
+        interest_rate: Number(row.interest_rate),
+        interest_amount: Number(row.interest_amount),
+        total_payable: Number(row.total_payable),
+        monthly_principal: Number(row.monthly_principal),
+        monthly_interest: Number(row.monthly_interest)
+    }));
     }
 
     // only unpaid debts
@@ -53,7 +89,15 @@ class Debt {
             `SELECT * FROM debts WHERE userId = ? AND status = 'pending' ORDER BY created_at DESC`,
             [userId]
         );
-        return rows;
+        return rows.map(row => ({
+        ...row,
+        debt_amount: Number(row.debt_amount),
+        interest_rate: Number(row.interest_rate),
+        interest_amount: Number(row.interest_amount),
+        total_payable: Number(row.total_payable),
+        monthly_principal: Number(row.monthly_principal),
+        monthly_interest: Number(row.monthly_interest)
+    }));
     }
 
     // only paid debts

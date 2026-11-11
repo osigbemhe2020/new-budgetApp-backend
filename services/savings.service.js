@@ -1,21 +1,20 @@
 
 const Savings = require('../models/savings.model');
 const SavingsSettings = require('../models/savings-settings.model');
-const Month = require('../models/Month.model');
+const Month = require('../models/month.model');
 const { getOrCreateActiveMonth } = require('./month.service');
+const { calculateInflationAtLock } = require('./inflation.service');
+const { calculateCreditScore } = require('./credit-score.service');
 
 const lockMonth = async (userId, monthId) => {
-
     const settings = await SavingsSettings.findByUserId(userId);
     if (!settings) throw new Error('No savings settings found for this user');
 
     const activeMonth = await Month.findById(monthId);
     if (!activeMonth) throw new Error('Month not found');
 
-    // calculate final amount_saved
     const amount_saved = (activeMonth.total_income * settings.savings_percentage / 100).toFixed(2);
 
-    // unlock_date = cycle_end_date + lock_duration_months
     const cycleEnd = new Date(activeMonth.cycle_end_date);
     const unlockDate = new Date(
         cycleEnd.getFullYear(),
@@ -24,7 +23,7 @@ const lockMonth = async (userId, monthId) => {
     );
     const unlock_date = unlockDate.toISOString().slice(0, 10);
 
-    // create permanent locked savings record
+    // create savings row
     const savings = await Savings.create({
         userId,
         monthId,
@@ -35,8 +34,58 @@ const lockMonth = async (userId, monthId) => {
         status: 'locked'
     });
 
+    // ✅ calculate inflation scores
+    try {
+        await calculateInflationAtLock(userId, monthId);
+        console.log(`✅ Inflation calculated for cycle ${monthId}`);
+    } catch (err) {
+        console.error(`⚠️ Inflation calculation failed:`, err);
+    }
+
+    // ✅ calculate credit score
+    try {
+        await calculateCreditScore(userId, monthId);
+        console.log(`✅ Credit score calculated for cycle ${monthId}`);
+    } catch (err) {
+        console.error(`⚠️ Credit score calculation failed:`, err);
+    }
+
     return savings;
 };
+
+// const lockMonth = async (userId, monthId) => {
+
+//     const settings = await SavingsSettings.findByUserId(userId);
+//     if (!settings) throw new Error('No savings settings found for this user');
+
+//     const activeMonth = await Month.findById(monthId);
+//     if (!activeMonth) throw new Error('Month not found');
+
+//     // calculate final amount_saved
+//     const amount_saved = (activeMonth.total_income * settings.savings_percentage / 100).toFixed(2);
+
+//     // unlock_date = cycle_end_date + lock_duration_months
+//     const cycleEnd = new Date(activeMonth.cycle_end_date);
+//     const unlockDate = new Date(
+//         cycleEnd.getFullYear(),
+//         cycleEnd.getMonth() + settings.lock_duration_months,
+//         cycleEnd.getDate()
+//     );
+//     const unlock_date = unlockDate.toISOString().slice(0, 10);
+
+//     // create permanent locked savings record
+//     const savings = await Savings.create({
+//         userId,
+//         monthId,
+//         savings_percentage: settings.savings_percentage,
+//         amount_saved: Number(amount_saved),
+//         lock_duration_months: settings.lock_duration_months,
+//         unlock_date,
+//         status: 'locked'
+//     });
+
+//     return savings;
+// };
 
 const lockSavings = async (req, res) => {
     try {

@@ -27,7 +27,7 @@ class SavingsSettings {
     static async update(userId, { savings_percentage, lock_duration_months }) {
         const [result] = await pool.execute(
             `UPDATE savings_settings 
-             SET savings_percentage = ?, lock_duration_months = ?, 
+             SET savings_percentage = ?, lock_duration_months = ?
              WHERE userId = ?`,
             [savings_percentage, lock_duration_months, userId]
         );

@@ -16,7 +16,7 @@ router.get('/', savingsController.getAllSavings);           // all locked saving
 router.get('/locked', savingsController.getLockedSavings);  // only locked ones
 
 // lock/unlock
-//router.post('/lock', savingsController.lockSavings);        // manual lock
+router.post('/lock', savingsController.lockSavings);        // lock current cycle
 router.post('/unlock', savingsController.unLockSavings);    // only if unlock_date passed
 
 module.exports = router;

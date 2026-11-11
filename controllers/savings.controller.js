@@ -4,6 +4,7 @@ const Month = require('../models/month.model');
 const GeneralSettings = require('../models/general-settings.model');
 const { getOrCreateActiveMonth } = require('../services/month.service');
 const Savings = require('../models/savings.model');
+const { formatDate } = require('../services/month.service');
 
 const createSavingsSettings = async (req, res) => {
     try {
@@ -59,7 +60,7 @@ const createSavingsSettings = async (req, res) => {
             message: "Savings settings created successfully",
             settings,
             projected_savings: Number(projected_savings),
-            cycle_end_date: activeMonth?.cycle_end_date || null  // ✅ from actual month data
+            cycle_end_date: formatDate(activeMonth?.cycle_end_date) || null // ✅ from actual month data
         });
 
     } catch (error) {
@@ -140,7 +141,7 @@ const updateSavingsSettings = async (req, res) => {
             // ✅ use cycle_end_date instead of hardcoded 28th
             notice: isCycleLocked
                 ? `Current cycle is locked. Changes will take effect from ${effectiveMonthName}.`
-                : `Changes take effect immediately. Current cycle ends: ${activeMonth.cycle_end_date}`
+                : `Changes take effect immediately. Current cycle ends: ${formatDate(activeMonth.cycle_end_date)}`
         });
 
     } catch (error) {
@@ -332,6 +333,71 @@ const unLockSavings = async (req, res) => {
     }
 };
 
+// -----------------------------------------------
+// POST /savings/lock - Lock current cycle savings
+// -----------------------------------------------
+const lockSavings = async (req, res) => {
+    try {
+        const userId = req.user.id;
+
+        // Get settings
+        const settings = await SavingsSettings.findByUserId(userId);
+        if (!settings) {
+            return res.status(404).json({
+                message: "No savings settings found. Please set up savings settings first."
+            });
+        }
+
+        // Get active month
+        const activeMonth = await getOrCreateActiveMonth(userId);
+
+        // Check if already locked this cycle
+        const existingSavings = await Savings.findByMonthId(activeMonth.id);
+        if (existingSavings.length > 0) {
+            return res.status(400).json({
+                message: "This cycle is already locked"
+            });
+        }
+
+        // Calculate projected savings amount
+        const amount_saved = (activeMonth.total_income * settings.savings_percentage / 100).toFixed(2);
+
+        // Calculate unlock date: cycle_end_date + lock_duration_months
+        const cycleEnd = new Date(activeMonth.cycle_end_date);
+        const unlockDate = new Date(
+            cycleEnd.getFullYear(),
+            cycleEnd.getMonth() + settings.lock_duration_months,
+            cycleEnd.getDate()
+        );
+
+        // Create savings record
+        const savings = await Savings.create({
+            userId,
+            monthId: activeMonth.id,
+            amount_saved: Number(amount_saved),
+            unlock_date: unlockDate.toISOString().split('T')[0],
+            lock_duration_months: settings.lock_duration_months,
+            status: 'locked'
+        });
+
+        res.status(201).json({
+            message: "Current cycle locked successfully 🔒",
+            savings,
+            details: {
+                amount_locked: Number(amount_saved),
+                savings_rate: settings.savings_percentage,
+                lock_duration_months: settings.lock_duration_months,
+                cycle_period: `${formatDate(activeMonth.cycle_start_date)} - ${formatDate(activeMonth.cycle_end_date)}`,
+                unlock_date: unlockDate.toISOString().split('T')[0]
+            }
+        });
+
+    } catch (error) {
+        console.error('ERROR locking savings:', error);
+        res.status(500).json({ message: "Internal server error" });
+    }
+};
+
 // helper — calculates unlock date from lock date + duration
 const getUnlockDate = (now, lock_duration_months) => {
     const unlockDate = new Date(now.getFullYear(), now.getMonth() + lock_duration_months, 28);
@@ -345,5 +411,6 @@ module.exports = {
     getLockedSavings,
     getUnlockDate,
     updateSavingsSettings,
+    lockSavings,
     unLockSavings
 };  

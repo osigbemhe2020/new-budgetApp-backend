@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/user.model');
 const Month = require('../models/month.model');
 const GeneralSettings = require('../models/general-settings.model');
+const SavingsSettings = require('../models/savings-settings.model');
 
 
 class AuthService {
@@ -160,6 +161,13 @@ static async register(userData) {
         // ✅ create general settings row with defaults
         // cycle_start_day is null until user adds their first income
         await GeneralSettings.create(newUser.UserID);
+
+        // Create savings settings with the same defaults shown in the frontend.
+        await SavingsSettings.create({
+            userId: newUser.UserID,
+            savings_percentage: 20,
+            lock_duration_months: 3,
+        });
 
         // ✅ create first month with default cycle (day 1 until first income sets it)
         const now = new Date();

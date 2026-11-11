@@ -12,6 +12,8 @@ router.get('/', expensesController.getAllExpenses);
 // POST /expenses - Create expense for logged-in user
 router.post('/', expensesController.createExpense);
 
+router.put('/:id', expensesController.updateExpense); 
+
 // DELETE /expenses/:id - Delete expense for logged-in user
 router.delete('/:id', expensesController.deleteExpense);
 

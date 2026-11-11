@@ -4,15 +4,23 @@ const ExpenseTemplate = require('../models/expense-template.model');
 const Debt = require('../models/debts.model');
 const Month = require('../models/month.model');
 const Savings = require('../models/savings.model');
-const Income = require('../models/income.model');
+const SavingsSettings = require('../models/savings-settings.model');
+const GeneralSettings = require('../models/general-settings.model');
 const { getOrCreateActiveMonth } = require('../services/month.service');
+const {
+    calculateDefaultReleaseDate,
+    validateReleaseDate,
+    getValidReleaseDateRange
+} = require('../helpers/releaseDateHelper');
+const { checkDebtEligibility, getCurrentInterestRate } = require('../helpers/debtEligibility');
+
 
 // -----------------------------------------------
 // POST /expenses
 // -----------------------------------------------
 const createExpense = async (req, res) => {
     try {
-        const { expense_name, amount, category, template_id } = req.body;
+        const { expense_name, amount, category, release_date } = req.body;
         const userId = req.user.id;
 
         if (!expense_name || amount == null) {
@@ -35,34 +43,81 @@ const createExpense = async (req, res) => {
             });
         }
 
+        // get user settings for buffer_days
+        const settings = await GeneralSettings.findByUserId(userId);
+        const bufferDays = settings?.expense_release_buffer_days || 3;
+
+        // resolve release_date
+        let finalReleaseDate;
+
+        if (release_date) {
+            // user provided a date — validate it
+            const validation = validateReleaseDate(release_date, activeMonth.cycle_end_date);
+            if (!validation.valid) {
+                return res.status(400).json({ message: validation.message });
+            }
+            finalReleaseDate = release_date;
+        } else {
+            // calculate default
+            const defaultDate = calculateDefaultReleaseDate(bufferDays, activeMonth.cycle_end_date);
+
+            if (!defaultDate) {
+                // default falls outside cycle — soft warning, no creation
+                const validRange = getValidReleaseDateRange(activeMonth.cycle_end_date);
+                return res.status(200).json({
+                    success: false,
+                    warning: `Not enough days left in this cycle for the default ${bufferDays}-day release window.`,
+                    valid_range: validRange,
+                    message: validRange
+                        ? `Please set a release_date between ${validRange.earliest} and ${validRange.latest}`
+                        : "There are no valid release dates left in this cycle. Wait for the next cycle to add this expense."
+                });
+            }
+
+            finalReleaseDate = defaultDate;
+        }
+
         // get current balance
         const currentBalance = Number(activeMonth.balance) || 0;
 
-       // check if expense exceeds balance → becomes a debt
-        if (amount > currentBalance) {
-            // calculate how much exceeds the balance
-            const debt_amount = amount - currentBalance;
+        // check if expense exceeds balance → becomes a debt
 
-            // ✅ use the new Debt.create() signature — interest auto-calculated at 15%
-            const debt = await Debt.create({
-                userId,
-                monthId: activeMonth.id,
-                debt_amount   // ✅ only the excess amount, not the full expense
-            });
+            if (amount > currentBalance) {
+                // ✅ check if debt feature is unlocked
+                const eligibility = await checkDebtEligibility(userId);
+                if (!eligibility.eligible) {
+                    return res.status(403).json({
+                        message: eligibility.message,
+                        active_cycles: eligibility.active_cycles,
+                        cycles_remaining: eligibility.cycles_remaining
+                    });
+                }
 
-            // if there was some balance left, record that portion as a normal expense
+                const debt_amount = amount - currentBalance;
+
+                // ✅ get current interest rate from credit score
+                const interest_rate = await getCurrentInterestRate(userId);
+
+                const debt = await Debt.create({
+                    userId,
+                    monthId: activeMonth.id,
+                    debt_amount,
+                    interest_rate  // ← now dynamic, not hardcoded 15%
+                });
+            
+
+            // if there was some balance left, record that portion as normal expense
             if (currentBalance > 0) {
                 await Expense.create({
                     userId,
                     monthId: activeMonth.id,
                     expense_name,
-                    amount: currentBalance, // ✅ only the part covered by balance
+                    amount: currentBalance,
                     category: category || null,
-                    date: new Date()
+                    release_date: finalReleaseDate
                 });
             }
 
-            // recalculate month totals with debt
             const updatedMonth = await recalculateMonthTotals(activeMonth.id);
 
             return res.status(201).json({
@@ -77,22 +132,29 @@ const createExpense = async (req, res) => {
             });
         }
 
-        // normal expense flow
+        // normal expense creation
         const expense = await Expense.create({
             userId,
             monthId: activeMonth.id,
             expense_name,
             amount,
             category: category || null,
-            date: new Date()
+            release_date: finalReleaseDate
         });
 
-        // recalculate month totals after adding expense
         const updatedMonth = await recalculateMonthTotals(activeMonth.id);
 
         res.status(201).json({
             message: "Expense created successfully",
             expense,
+            release_info: {
+                release_date: finalReleaseDate,
+                is_released: false,
+                // warn user if release is today + 3 (default)
+                notice: !release_date
+                    ? `This expense will be released on ${finalReleaseDate} (${bufferDays}-day default)`
+                    : null
+            },
             month_summary: {
                 total_income: updatedMonth.total_income,
                 total_expense: updatedMonth.total_expense,
@@ -113,11 +175,12 @@ const createExpense = async (req, res) => {
 const getAllExpenses = async (req, res) => {
     try {
         const userId = req.user.id;
-
         const expenses = await Expense.findByUserId(userId);
-
-        // get active month for summary
         const activeMonth = await getOrCreateActiveMonth(userId);
+
+        // separate released and unreleased for clarity
+        const released = expenses.filter(e => e.is_released);
+        const unreleased = expenses.filter(e => !e.is_released);
 
         res.status(200).json({
             message: "Expenses fetched successfully",
@@ -128,11 +191,68 @@ const getAllExpenses = async (req, res) => {
                 total_expense: activeMonth.total_expense,
                 balance: activeMonth.balance
             },
-            expenses
+            expenses: {
+                unreleased,  // still editable
+                released     // locked
+            }
         });
 
     } catch (error) {
         console.error('ERROR fetching expenses:', error);
+        res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+// -----------------------------------------------
+// PUT /expenses/:id
+// -----------------------------------------------
+const updateExpense = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { expense_name, amount, category } = req.body;
+        const userId = req.user.id;
+
+        if (!expense_name || amount == null) {
+            return res.status(400).json({ message: "expense_name and amount are required" });
+        }
+
+        const expense = await Expense.findById(id);
+        if (!expense) {
+            return res.status(404).json({ message: "Expense not found" });
+        }
+
+        // block if released
+        if (expense.is_released) {
+            return res.status(403).json({
+                message: "Cannot edit expense — it has already been released",
+                released_on: expense.release_date
+            });
+        }
+
+        // block if cycle is locked
+        const month = await Month.findById(expense.monthId);
+        const existingSavings = await Savings.findByMonthId(month.id);
+        if (existingSavings.length > 0) {
+            return res.status(403).json({
+                message: "Cannot edit expense — this cycle is locked"
+            });
+        }
+
+        await Expense.update(id, { expense_name, amount, category });
+        const updatedMonth = await recalculateMonthTotals(month.id);
+
+        res.status(200).json({
+            message: "Expense updated successfully",
+            month_summary: {
+                total_income: updatedMonth.total_income,
+                total_expense: updatedMonth.total_expense,
+                balance: updatedMonth.balance,
+                debt_cost: updatedMonth.debt_cost
+            }
+        });
+
+    } catch (error) {
+        console.error('ERROR updating expense:', error);
         res.status(500).json({ message: "Internal server error" });
     }
 };
@@ -145,30 +265,29 @@ const deleteExpense = async (req, res) => {
         const { id } = req.params;
         const userId = req.user.id;
 
-        // find expense first to get monthId
         const expense = await Expense.findById(id);
         if (!expense) {
             return res.status(404).json({ message: "Expense not found" });
         }
 
-        // get the month this expense belongs to
-        const month = await Month.findById(expense.monthId);
-
-        // block deletion if cycle is locked
-        const existingSavings = await Savings.findByMonthId(month.id);
-        if (existingSavings.length > 0) {
+        // block if released
+        if (expense.is_released) {
             return res.status(403).json({
-                message: "Cannot delete expense — this cycle is locked",
-                locked_since: existingSavings[0].created_at
+                message: "Cannot delete expense — it has already been released",
+                released_on: expense.release_date
             });
         }
 
-        const deleted = await Expense.delete(id);
-        if (!deleted) {
-            return res.status(404).json({ message: "Expense not found" });
+        // block if cycle is locked
+        const month = await Month.findById(expense.monthId);
+        const existingSavings = await Savings.findByMonthId(month.id);
+        if (existingSavings.length > 0) {
+            return res.status(403).json({
+                message: "Cannot delete expense — this cycle is locked"
+            });
         }
 
-        // recalculate month totals after deletion
+        await Expense.delete(id);
         const updatedMonth = await recalculateMonthTotals(month.id);
 
         res.status(200).json({
@@ -192,48 +311,76 @@ const deleteExpense = async (req, res) => {
 // -----------------------------------------------
 const createTemplate = async (req, res) => {
     try {
-        const { template_name, default_amount, category, is_recurring, recurring_day } = req.body;
+        const {
+            template_name,
+            default_amount,
+            category,
+            is_recurring,
+            recurring_day,
+            release_date,
+            is_basket,
+            parent_basket_id
+        } = req.body;
         const userId = req.user.id;
 
-        if (!template_name || default_amount == null) {
-            return res.status(400).json({ message: "template_name and default_amount are required" });
+        // basket templates have no price — skip amount validation for them
+        if (!is_basket && (default_amount == null || default_amount <= 0)) {
+            return res.status(400).json({ message: "default_amount is required and must be greater than 0" });
         }
 
-        if (default_amount <= 0) {
-            return res.status(400).json({ message: "Amount must be greater than 0" });
+        if (!template_name) {
+            return res.status(400).json({ message: "template_name is required" });
         }
 
-        // validate recurring_day if template is recurring
         if (is_recurring && !recurring_day) {
-            return res.status(400).json({
-                message: "recurring_day is required for recurring templates"
-            });
+            return res.status(400).json({ message: "recurring_day is required for recurring templates" });
         }
 
-        // recurring_day must be between 1 and 28
-        // we cap at 28 to avoid issues with short months
         if (is_recurring && (recurring_day < 1 || recurring_day > 28)) {
+            return res.status(400).json({ message: "recurring_day must be between 1 and 28" });
+        }
+        if (release_date) {
+    // templates don't belong to a specific cycle yet
+    // so we just validate it's not in the past
+        const today = new Date().toISOString().slice(0, 10);
+        const tomorrow = new Date();
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        const tomorrowStr = tomorrow.toISOString().slice(0, 10);
+
+        if (release_date < tomorrowStr) {
             return res.status(400).json({
-                message: "recurring_day must be between 1 and 28"
+                message: `Template release_date must be at least tomorrow (${tomorrowStr})`
             });
+        }
+     }
+        // if parent_basket_id is provided, verify the basket exists
+        if (parent_basket_id) {
+            const basket = await ExpenseTemplate.findById(parent_basket_id);
+            if (!basket || !basket.is_basket) {
+                return res.status(400).json({ message: "Invalid parent_basket_id — basket not found" });
+            }
         }
 
         const template = await ExpenseTemplate.create({
             userId,
             template_name,
-            default_amount,
+            default_amount: is_basket ? null : default_amount,
             category: category || null,
             is_recurring: is_recurring || false,
-            recurring_day: is_recurring ? recurring_day : null
+            recurring_day: is_recurring ? recurring_day : null,
+            release_date: release_date || null,
+            is_basket: is_basket || false,
+            parent_basket_id: parent_basket_id || null
         });
 
         res.status(201).json({
             message: "Template created successfully",
             template,
-            // tell user when first auto-expense will fire if recurring
             notice: is_recurring
                 ? `This expense will automatically be added on day ${recurring_day} of each cycle`
-                : "Template saved. Use it to quickly add expenses."
+                : is_basket
+                    ? "Basket created. Add items to it using parent_basket_id."
+                    : "Template saved. Use it to quickly add expenses."
         });
 
     } catch (error) {
@@ -248,21 +395,25 @@ const createTemplate = async (req, res) => {
 const getAllTemplates = async (req, res) => {
     try {
         const userId = req.user.id;
-
         const templates = await ExpenseTemplate.findByUserId(userId);
 
-        // separate recurring and non-recurring for clarity
-        const recurring = templates.filter(t => t.is_recurring);
-        const nonRecurring = templates.filter(t => !t.is_recurring);
+        // separate by type for clarity
+        const baskets = templates.filter(t => t.is_basket);
+        const recurring = templates.filter(t => t.is_recurring && !t.is_basket);
+        const regular = templates.filter(t => !t.is_recurring && !t.is_basket);
+
+        // for each basket, attach its items
+        for (const basket of baskets) {
+            basket.items = await ExpenseTemplate.findBasketItems(basket.id);
+        }
 
         res.status(200).json({
             message: "Templates fetched successfully",
             count: templates.length,
-            recurring_count: recurring.length,
-            non_recurring_count: nonRecurring.length,
             templates: {
+                baskets,
                 recurring,
-                non_recurring: nonRecurring
+                regular
             }
         });
 
@@ -280,23 +431,30 @@ const deleteTemplate = async (req, res) => {
         const { id } = req.params;
         const userId = req.user.id;
 
-        // find template first to verify ownership
         const template = await ExpenseTemplate.findById(id);
         if (!template) {
             return res.status(404).json({ message: "Template not found" });
         }
 
-        // make sure template belongs to this user
         if (template.userId !== userId) {
             return res.status(403).json({ message: "Unauthorized" });
         }
 
-        const deleted = await ExpenseTemplate.delete(id);
-        if (!deleted) {
-            return res.status(404).json({ message: "Template not found" });
+        // if it's a basket, also delete all its child items
+        if (template.is_basket) {
+            const items = await ExpenseTemplate.findBasketItems(id);
+            for (const item of items) {
+                await ExpenseTemplate.delete(item.id);
+            }
         }
 
-        res.status(200).json({ message: "Template deleted successfully" });
+        await ExpenseTemplate.delete(id);
+
+        res.status(200).json({
+            message: template.is_basket
+                ? "Basket and all its items deleted successfully"
+                : "Template deleted successfully"
+        });
 
     } catch (error) {
         console.error('ERROR deleting template:', error);
@@ -307,33 +465,7 @@ const deleteTemplate = async (req, res) => {
 // -----------------------------------------------
 // helper — recalculates month totals
 // -----------------------------------------------
-// const recalculateMonthTotals = async (monthId) => {
-//     // get all expenses for this month
-//     const expenses = await Expense.findByMonthId(monthId);
-//     const total_expense = expenses.reduce((sum, e) => sum + Number(e.amount), 0);
 
-//     // get all debts for this month
-//     const debts = await Debt.findByMonthId(monthId);
-//     const debt_cost = debts.reduce((sum, d) => sum + Number(d.debt_amount), 0);
-
-//     // get current month for income
-//     const currentMonth = await Month.findById(monthId);
-//     const total_income = Number(currentMonth.total_income) || 0;
-
-//     // balance = income - expenses - debts
-//     const balance = total_income - total_expense - debt_cost;
-//     const money_saved = balance > 0 ? balance : 0;
-
-//     await Month.updateTotals(monthId, {
-//         total_income,
-//         total_expense,
-//         money_saved,
-//         debt_cost,
-//         balance
-//     });
-
-//     return { total_income, total_expense, balance, debt_cost, money_saved };
-// };
 
 const recalculateMonthTotals = async (monthId) => {
     const expenses = await Expense.findByMonthId(monthId);
@@ -346,9 +478,17 @@ const recalculateMonthTotals = async (monthId) => {
     const total_income = Number(currentMonth.total_income) || 0;
     const balance_brought_forward = Number(currentMonth.balance_brought_forward) || 0;
 
-    // balance now includes whatever surplus rolled in from last cycle
-    const balance = total_income - total_expense - debt_cost + balance_brought_forward;
-    const money_saved = balance > 0 ? balance : 0;
+    // ✅ use existing model instead of raw SQL
+    const savingsSettings = await SavingsSettings.findByUserId(currentMonth.userId);
+    const savings_percentage = savingsSettings
+        ? Number(savingsSettings.savings_percentage)
+        : 0;
+
+    // money_saved = projected savings (income × savings%)
+    const money_saved = Number((total_income * savings_percentage / 100).toFixed(2));
+
+    // balance = income - expenses - debts - savings + brought forward
+    const balance = total_income - total_expense - debt_cost - money_saved + balance_brought_forward;
 
     await Month.updateTotals(monthId, {
         total_income,
@@ -365,8 +505,382 @@ const recalculateMonthTotals = async (monthId) => {
 module.exports = {
     createExpense,
     getAllExpenses,
+    updateExpense,
     deleteExpense,
     createTemplate,
     getAllTemplates,
     deleteTemplate
 };
+
+// // controllers/expenses.controller.js
+// const Expense = require('../models/expense.model');
+// const ExpenseTemplate = require('../models/expense-template.model');
+// const Debt = require('../models/debts.model');
+// const Month = require('../models/month.model');
+// const Savings = require('../models/savings.model');
+// const Income = require('../models/income.model');
+// const { getOrCreateActiveMonth } = require('../services/month.service');
+
+// // -----------------------------------------------
+// // POST /expenses
+// // -----------------------------------------------
+// const createExpense = async (req, res) => {
+//     try {
+//         const { expense_name, amount, category, template_id } = req.body;
+//         const userId = req.user.id;
+
+//         if (!expense_name || amount == null) {
+//             return res.status(400).json({ message: "expense_name and amount are required" });
+//         }
+
+//         if (amount <= 0) {
+//             return res.status(400).json({ message: "Amount must be greater than 0" });
+//         }
+
+//         // get active month
+//         const activeMonth = await getOrCreateActiveMonth(userId);
+
+//         // block if cycle is locked
+//         const existingSavings = await Savings.findByMonthId(activeMonth.id);
+//         if (existingSavings.length > 0) {
+//             return res.status(403).json({
+//                 message: "Cannot add expense — current cycle is locked",
+//                 cycle_end_date: activeMonth.cycle_end_date
+//             });
+//         }
+
+//         // get current balance
+//         const currentBalance = Number(activeMonth.balance) || 0;
+
+//        // check if expense exceeds balance → becomes a debt
+//         if (amount > currentBalance) {
+//             // calculate how much exceeds the balance
+//             const debt_amount = amount - currentBalance;
+
+//             // ✅ use the new Debt.create() signature — interest auto-calculated at 15%
+//             const debt = await Debt.create({
+//                 userId,
+//                 monthId: activeMonth.id,
+//                 debt_amount   // ✅ only the excess amount, not the full expense
+//             });
+
+//             // if there was some balance left, record that portion as a normal expense
+//             if (currentBalance > 0) {
+//                 await Expense.create({
+//                     userId,
+//                     monthId: activeMonth.id,
+//                     expense_name,
+//                     amount: currentBalance, // ✅ only the part covered by balance
+//                     category: category || null,
+//                     date: new Date()
+//                 });
+//             }
+
+//             // recalculate month totals with debt
+//             const updatedMonth = await recalculateMonthTotals(activeMonth.id);
+
+//             return res.status(201).json({
+//                 message: "Expense exceeds your balance — excess registered as debt",
+//                 debt,
+//                 month_summary: {
+//                     total_income: updatedMonth.total_income,
+//                     total_expense: updatedMonth.total_expense,
+//                     balance: updatedMonth.balance,
+//                     debt_cost: updatedMonth.debt_cost
+//                 }
+//             });
+//         }
+
+//         // normal expense flow
+//         const expense = await Expense.create({
+//             userId,
+//             monthId: activeMonth.id,
+//             expense_name,
+//             amount,
+//             category: category || null,
+//             date: new Date()
+//         });
+
+//         // recalculate month totals after adding expense
+//         const updatedMonth = await recalculateMonthTotals(activeMonth.id);
+
+//         res.status(201).json({
+//             message: "Expense created successfully",
+//             expense,
+//             month_summary: {
+//                 total_income: updatedMonth.total_income,
+//                 total_expense: updatedMonth.total_expense,
+//                 balance: updatedMonth.balance,
+//                 debt_cost: updatedMonth.debt_cost
+//             }
+//         });
+
+//     } catch (error) {
+//         console.error('ERROR creating expense:', error);
+//         res.status(500).json({ message: "Internal server error" });
+//     }
+// };
+
+// // -----------------------------------------------
+// // GET /expenses
+// // -----------------------------------------------
+// const getAllExpenses = async (req, res) => {
+//     try {
+//         const userId = req.user.id;
+
+//         const expenses = await Expense.findByUserId(userId);
+
+//         // get active month for summary
+//         const activeMonth = await getOrCreateActiveMonth(userId);
+
+//         res.status(200).json({
+//             message: "Expenses fetched successfully",
+//             count: expenses.length,
+//             current_cycle: {
+//                 cycle_start_date: activeMonth.cycle_start_date,
+//                 cycle_end_date: activeMonth.cycle_end_date,
+//                 total_expense: activeMonth.total_expense,
+//                 balance: activeMonth.balance
+//             },
+//             expenses
+//         });
+
+//     } catch (error) {
+//         console.error('ERROR fetching expenses:', error);
+//         res.status(500).json({ message: "Internal server error" });
+//     }
+// };
+
+// // -----------------------------------------------
+// // DELETE /expenses/:id
+// // -----------------------------------------------
+// const deleteExpense = async (req, res) => {
+//     try {
+//         const { id } = req.params;
+//         const userId = req.user.id;
+
+//         // find expense first to get monthId
+//         const expense = await Expense.findById(id);
+//         if (!expense) {
+//             return res.status(404).json({ message: "Expense not found" });
+//         }
+
+//         // get the month this expense belongs to
+//         const month = await Month.findById(expense.monthId);
+
+//         // block deletion if cycle is locked
+//         const existingSavings = await Savings.findByMonthId(month.id);
+//         if (existingSavings.length > 0) {
+//             return res.status(403).json({
+//                 message: "Cannot delete expense — this cycle is locked",
+//                 locked_since: existingSavings[0].created_at
+//             });
+//         }
+
+//         const deleted = await Expense.delete(id);
+//         if (!deleted) {
+//             return res.status(404).json({ message: "Expense not found" });
+//         }
+
+//         // recalculate month totals after deletion
+//         const updatedMonth = await recalculateMonthTotals(month.id);
+
+//         res.status(200).json({
+//             message: "Expense deleted successfully",
+//             month_summary: {
+//                 total_income: updatedMonth.total_income,
+//                 total_expense: updatedMonth.total_expense,
+//                 balance: updatedMonth.balance,
+//                 debt_cost: updatedMonth.debt_cost
+//             }
+//         });
+
+//     } catch (error) {
+//         console.error('ERROR deleting expense:', error);
+//         res.status(500).json({ message: "Internal server error" });
+//     }
+// };
+
+// // -----------------------------------------------
+// // POST /expenses/templates
+// // -----------------------------------------------
+// const createTemplate = async (req, res) => {
+//     try {
+//         const { template_name, default_amount, category, is_recurring, recurring_day } = req.body;
+//         const userId = req.user.id;
+
+//         if (!template_name || default_amount == null) {
+//             return res.status(400).json({ message: "template_name and default_amount are required" });
+//         }
+
+//         if (default_amount <= 0) {
+//             return res.status(400).json({ message: "Amount must be greater than 0" });
+//         }
+
+//         // validate recurring_day if template is recurring
+//         if (is_recurring && !recurring_day) {
+//             return res.status(400).json({
+//                 message: "recurring_day is required for recurring templates"
+//             });
+//         }
+
+//         // recurring_day must be between 1 and 28
+//         // we cap at 28 to avoid issues with short months
+//         if (is_recurring && (recurring_day < 1 || recurring_day > 28)) {
+//             return res.status(400).json({
+//                 message: "recurring_day must be between 1 and 28"
+//             });
+//         }
+
+//         const template = await ExpenseTemplate.create({
+//             userId,
+//             template_name,
+//             default_amount,
+//             category: category || null,
+//             is_recurring: is_recurring || false,
+//             recurring_day: is_recurring ? recurring_day : null
+//         });
+
+//         res.status(201).json({
+//             message: "Template created successfully",
+//             template,
+//             // tell user when first auto-expense will fire if recurring
+//             notice: is_recurring
+//                 ? `This expense will automatically be added on day ${recurring_day} of each cycle`
+//                 : "Template saved. Use it to quickly add expenses."
+//         });
+
+//     } catch (error) {
+//         console.error('ERROR creating template:', error);
+//         res.status(500).json({ message: "Internal server error" });
+//     }
+// };
+
+// // -----------------------------------------------
+// // GET /expenses/templates
+// // -----------------------------------------------
+// const getAllTemplates = async (req, res) => {
+//     try {
+//         const userId = req.user.id;
+
+//         const templates = await ExpenseTemplate.findByUserId(userId);
+
+//         // separate recurring and non-recurring for clarity
+//         const recurring = templates.filter(t => t.is_recurring);
+//         const nonRecurring = templates.filter(t => !t.is_recurring);
+
+//         res.status(200).json({
+//             message: "Templates fetched successfully",
+//             count: templates.length,
+//             recurring_count: recurring.length,
+//             non_recurring_count: nonRecurring.length,
+//             templates: {
+//                 recurring,
+//                 non_recurring: nonRecurring
+//             }
+//         });
+
+//     } catch (error) {
+//         console.error('ERROR fetching templates:', error);
+//         res.status(500).json({ message: "Internal server error" });
+//     }
+// };
+
+// // -----------------------------------------------
+// // DELETE /expenses/templates/:id
+// // -----------------------------------------------
+// const deleteTemplate = async (req, res) => {
+//     try {
+//         const { id } = req.params;
+//         const userId = req.user.id;
+
+//         // find template first to verify ownership
+//         const template = await ExpenseTemplate.findById(id);
+//         if (!template) {
+//             return res.status(404).json({ message: "Template not found" });
+//         }
+
+//         // make sure template belongs to this user
+//         if (template.userId !== userId) {
+//             return res.status(403).json({ message: "Unauthorized" });
+//         }
+
+//         const deleted = await ExpenseTemplate.delete(id);
+//         if (!deleted) {
+//             return res.status(404).json({ message: "Template not found" });
+//         }
+
+//         res.status(200).json({ message: "Template deleted successfully" });
+
+//     } catch (error) {
+//         console.error('ERROR deleting template:', error);
+//         res.status(500).json({ message: "Internal server error" });
+//     }
+// };
+
+// // -----------------------------------------------
+// // helper — recalculates month totals
+// // -----------------------------------------------
+// // const recalculateMonthTotals = async (monthId) => {
+// //     // get all expenses for this month
+// //     const expenses = await Expense.findByMonthId(monthId);
+// //     const total_expense = expenses.reduce((sum, e) => sum + Number(e.amount), 0);
+
+// //     // get all debts for this month
+// //     const debts = await Debt.findByMonthId(monthId);
+// //     const debt_cost = debts.reduce((sum, d) => sum + Number(d.debt_amount), 0);
+
+// //     // get current month for income
+// //     const currentMonth = await Month.findById(monthId);
+// //     const total_income = Number(currentMonth.total_income) || 0;
+
+// //     // balance = income - expenses - debts
+// //     const balance = total_income - total_expense - debt_cost;
+// //     const money_saved = balance > 0 ? balance : 0;
+
+// //     await Month.updateTotals(monthId, {
+// //         total_income,
+// //         total_expense,
+// //         money_saved,
+// //         debt_cost,
+// //         balance
+// //     });
+
+// //     return { total_income, total_expense, balance, debt_cost, money_saved };
+// // };
+
+// const recalculateMonthTotals = async (monthId) => {
+//     const expenses = await Expense.findByMonthId(monthId);
+//     const total_expense = expenses.reduce((sum, e) => sum + Number(e.amount), 0);
+
+//     const debts = await Debt.findByMonthId(monthId);
+//     const debt_cost = debts.reduce((sum, d) => sum + Number(d.debt_amount), 0);
+
+//     const currentMonth = await Month.findById(monthId);
+//     const total_income = Number(currentMonth.total_income) || 0;
+//     const balance_brought_forward = Number(currentMonth.balance_brought_forward) || 0;
+
+//     // balance now includes whatever surplus rolled in from last cycle
+//     const balance = total_income - total_expense - debt_cost + balance_brought_forward;
+//     const money_saved = balance > 0 ? balance : 0;
+
+//     await Month.updateTotals(monthId, {
+//         total_income,
+//         total_expense,
+//         money_saved,
+//         debt_cost,
+//         balance,
+//         balance_brought_forward
+//     });
+
+//     return { total_income, total_expense, balance, debt_cost, money_saved, balance_brought_forward };
+// };
+
+// module.exports = {
+//     createExpense,
+//     getAllExpenses,
+//     deleteExpense,
+//     createTemplate,
+//     getAllTemplates,
+//     deleteTemplate
+// };

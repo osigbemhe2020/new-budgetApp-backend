@@ -2,6 +2,7 @@ const Debt = require('../models/debts.model');
 const Month = require('../models/month.model');
 const Expense = require('../models/expense.model');
 const { getOrCreateActiveMonth } = require('../services/month.service');
+const { checkDebtEligibility, getCurrentInterestRate } = require('../helpers/debtEligibility');
 
 // -----------------------------------------------
 // GET /debts
@@ -102,12 +103,26 @@ const createDebt = async (req, res) => {
             return res.status(400).json({ message: "debt_amount must be greater than 0" });
         }
 
+        // ✅ check if debt feature is unlocked
+        const eligibility = await checkDebtEligibility(userId);
+        if (!eligibility.eligible) {
+            return res.status(403).json({
+                message: eligibility.message,
+                active_cycles: eligibility.active_cycles,
+                cycles_remaining: eligibility.cycles_remaining
+            });
+        }
+
         const activeMonth = await getOrCreateActiveMonth(userId);
+
+        // ✅ get dynamic interest rate from credit score
+        const interest_rate = await getCurrentInterestRate(userId);
 
         const debt = await Debt.create({
             userId,
             monthId: activeMonth.id,
-            debt_amount
+            debt_amount,
+            interest_rate
         });
 
         res.status(201).json({
@@ -115,12 +130,12 @@ const createDebt = async (req, res) => {
             debt,
             notice: "Set a repayment plan using PUT /debts/:id/repayment"
         });
+
     } catch (error) {
         console.error('ERROR creating debt:', error);
         res.status(500).json({ message: "Internal server error" });
     }
 };
-
 // -----------------------------------------------
 // PUT /debts/:id/repayment — set repayment plan
 // -----------------------------------------------

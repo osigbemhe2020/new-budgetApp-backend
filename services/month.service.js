@@ -178,4 +178,4 @@ const updateActiveCycle = async (userId, new_cycle_start_day) => {
     await GeneralSettings.updateCycleStartDay(userId, new_cycle_start_day);
 };
 
-module.exports = { getOrCreateActiveMonth, updateActiveCycle };
+module.exports = { getOrCreateActiveMonth, updateActiveCycle, formatDate };
