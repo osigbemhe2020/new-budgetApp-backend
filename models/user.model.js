@@ -2,12 +2,12 @@ const pool = require('../config/db');
 
 class User {
   // Create a new user
-  static async create({ name, email, password }) {
+  static async create({ username, email, passwordHash }) {
     const [result] = await pool.execute(
       'INSERT INTO user_info (username, email, password_hash) VALUES (?, ?, ?)',
-      [name, email, password]
+      [username, email, passwordHash]
     );
-    return { UserID: result.insertId, FullName: name, Email: email };
+    return { userId: result.insertId, username, email };
   }
 
   // Find user by ID
@@ -21,9 +21,9 @@ class User {
     }
     const row = rows[0];
     return {
-      UserID: row.userId || row.UserID,
-      FullName: row.username || row.FullName,
-      Email: row.email || row.Email,
+      userId: row.userId,
+      username: row.username,
+      email: row.email,
       password_hash: row.password_hash,
       created_at: row.created_at
     };
@@ -40,9 +40,9 @@ class User {
     }
     const row = rows[0];
     return {
-      UserID: row.userId || row.UserID,
-      FullName: row.username || row.FullName,
-      Email: row.email || row.Email,
+      userId: row.userId,
+      username: row.username,
+      email: row.email,
       password_hash: row.password_hash,
       created_at: row.created_at
     };
@@ -51,16 +51,16 @@ class User {
   // Get all user_info
   static async findAll() {
     const [rows] = await pool.execute(
-      'SELECT UserID, FullName, Email, created_at FROM user_info'
+      'SELECT userId, username, email, created_at FROM user_info'
     );
     return rows;
   }
 
   // Update a user
-  static async update(id, { name, email }) {
+  static async update(id, { username, email }) {
     await pool.execute(
-      'UPDATE user_info SET FullName = ?, Email = ? WHERE UserID = ?',
-      [name, email, id]
+      'UPDATE user_info SET username = ?, email = ? WHERE userId = ?',
+      [username, email, id]
     );
     return this.findById(id);
   }

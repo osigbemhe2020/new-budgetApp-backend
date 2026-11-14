@@ -2,8 +2,30 @@ const AuthService = require("../services/auth.service");
 const User = require("../models/user.model");
 
 const signup = async (req, res) => {
+    const { email, username, password } = req.body || {};
+
+    if (typeof email !== "string" || !email.trim()) {
+        return res.status(400).json({ message: "Email is required" });
+    }
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+        return res.status(400).json({ message: "Enter a valid email address" });
+    }
+
+    if (typeof username !== "string" || !username.trim()) {
+        return res.status(400).json({ message: "Username is required" });
+    }
+
+    if (typeof password !== "string" || !password) {
+        return res.status(400).json({ message: "Password is required" });
+    }
+
     try {
-        const result = await AuthService.register(req.body);
+        const result = await AuthService.register({
+            username: username.trim(),
+            email: email.trim(),
+            password
+        });
         
         res.status(201).json({ 
             message: "User added successfully",
@@ -14,7 +36,7 @@ const signup = async (req, res) => {
     } catch (error) {
         console.error('Signup error:', error);
         
-        if (error.message === "User already exists") {
+        if (["Password must be at least 6 characters long", "User already exists"].includes(error.message)) {
             return res.status(400).json({ message: error.message });
         }
         
@@ -25,6 +47,11 @@ const signup = async (req, res) => {
 const login = async (req, res) => {
     try {
         const { email, password } = req.body;
+
+        if (!email || !password) {
+            return res.status(400).json({ message: "Email and password are required" });
+        }
+        
         const result = await AuthService.login(email, password);
         
         res.status(200).json({
@@ -59,9 +86,9 @@ const profile = async (req, res) => {
         res.status(200).json({
             message: "Profile retrieved successfully",
             user: {
-                UserID: user.UserID,
-                FullName: user.FullName,
-                Email: user.Email,
+                userId: user.userId,
+                username: user.username,
+                email: user.email,
                 created_at: user.created_at
             }
         });

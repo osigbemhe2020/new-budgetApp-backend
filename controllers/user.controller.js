@@ -12,7 +12,7 @@ const getMe = async (req, res) => {
 
         // get user info
         const [userRows] = await pool.execute(
-            'SELECT UserID, FullName, Email, created_at FROM user_info WHERE UserID = ?',
+            'SELECT userId, username, email, created_at FROM user_info WHERE userId = ?',
             [userId]
         );
         const user = userRows[0];
@@ -52,10 +52,10 @@ const getMe = async (req, res) => {
         res.status(200).json({
             message: "User profile fetched successfully",
             user: {
-                id: user.UserID,
-                name: user.FullName,
-                email: user.Email,
-                member_since: user.created_at
+                userId: user.userId,
+                username: user.username,
+                email: user.email,
+                created_at: user.created_at
             },
             current_cycle: {
                 cycle_start_date: activeMonth.cycle_start_date,

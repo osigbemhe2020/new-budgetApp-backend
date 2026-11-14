@@ -31,8 +31,8 @@ class AuthService {
     static generateResetToken(user) {
         return jwt.sign(
             { 
-                id: user.UserID, 
-                email: user.Email,
+                id: user.userId, 
+                email: user.email,
                 type: 'password_reset'
             },
             process.env.JWT_SECRET,
@@ -52,155 +52,72 @@ class AuthService {
     }
 
     // User registration service
-    // static async register(userData) {
-    //     try {
-    //         const email = userData.Email || userData.email;
-    //         const name = userData.FullName || userData.fullName || userData.name || userData.username;
-    //         const password = userData.password || userData.Password;
+    static async register({ username, email, password } = {}) {
+        try {
+            if (!email) throw new Error("Email is required");
+            if (!username) throw new Error("Username is required");
+            if (!password) throw new Error("Password is required");
 
-    //         if (!email) {
-    //             throw new Error("Email is required");
-    //         }
+            // check if user already exists
+            const existingUser = await User.findByEmail(email);
+            if (existingUser) throw new Error("User already exists");
 
-    //         if (!name) {
-    //             throw new Error("Name is required");
-    //         }
+            // validate password
+            const passwordValidation = this.validatePassword(password);
+            if (!passwordValidation.isValid) throw new Error(passwordValidation.message);
 
-    //         if (!password) {
-    //             throw new Error("Password is required");
-    //         }
+            // hash password
+            const hashedPassword = this.hashPassword(password);
 
-    //         // Check if user already exists
-    //         const existingUser = await User.findByEmail(email);
-    //         if (existingUser) {
-    //             throw new Error("User already exists");
-    //         }
+            // create user
+            const newUser = await User.create({
+                username,
+                email,
+                passwordHash: hashedPassword
+            });
 
-    //         // Validate password
-    //         const passwordValidation = this.validatePassword(password);
-    //         if (!passwordValidation.isValid) {
-    //             throw new Error(passwordValidation.message);
-    //         }
+            // cycle_start_day is null until user adds their first income
+            await GeneralSettings.create(newUser.userId);
 
-    //         // Hash password
-    //         const hashedPassword = this.hashPassword(password);
+            // Create savings settings with the same defaults shown in the frontend.
+            await SavingsSettings.create({
+                userId: newUser.userId,
+                savings_percentage: 20,
+                lock_duration_months: 3,
+            });
 
-    //         // Create user
-    //         const newUser = await User.create({
-    //             name,
-    //             email,
-    //             password: hashedPassword
-    //         });
+            // create first month with default cycle (day 1 until first income sets it)
+            const now = new Date();
+            const { calculateCycle } = require('../helpers/cycleCalculator');
+            const cycle = calculateCycle(1, now); // default cycle_start_day = 1
 
-    //         const now = new Date();
-    //         let monthMessage = null;
+            await Month.create({
+                userId: newUser.userId,
+                year: cycle.record_year,
+                month: cycle.record_month,
+                cycle_start_date: cycle.cycle_start_date,
+                cycle_end_date: cycle.cycle_end_date
+            });
 
-    //         try {
-    //             const activeMonth = await Month.create({
-    //                 userId: newUser.UserID,
-    //                 year: now.getFullYear(),
-    //                 month: now.getMonth() + 1 // getMonth() is 0-indexed so June = 5, +1 makes it 6
-    //             });
+            // generate token
+            const token = this.generateToken({
+                id: newUser.userId,
+                email: newUser.email
+            });
 
-    //             monthMessage = activeMonth ? "Active month created" : "Failed to create active month";
-    //         } catch (monthError) {
-    //             monthMessage = `Failed to create active month: ${monthError.message}`;
-    //             console.error('Active month creation error:', monthError);
-    //         }
+            return {
+                user: {
+                    userId: newUser.userId,
+                    username: newUser.username,
+                    email: newUser.email
+                },
+                token
+            };
 
-    //         // Generate token
-    //         const token = this.generateToken({
-    //             id: newUser.UserID,
-    //             email: newUser.Email
-    //         });
-
-    //         return {
-    //             user: {
-    //                 UserID: newUser.UserID,
-    //                 FullName: newUser.FullName,
-    //                 Email: newUser.Email
-    //             },
-    //             token,
-    //             monthMessage
-    //         };
-
-    //     } catch (error) {
-    //         throw error;
-    //     }
-    // }
-   
-
-static async register(userData) {
-    try {
-        const email = userData.Email || userData.email;
-        const name = userData.FullName || userData.fullName || userData.name || userData.username;
-        const password = userData.password || userData.Password;
-
-        if (!email) throw new Error("Email is required");
-        if (!name) throw new Error("Name is required");
-        if (!password) throw new Error("Password is required");
-
-        // check if user already exists
-        const existingUser = await User.findByEmail(email);
-        if (existingUser) throw new Error("User already exists");
-
-        // validate password
-        const passwordValidation = this.validatePassword(password);
-        if (!passwordValidation.isValid) throw new Error(passwordValidation.message);
-
-        // hash password
-        const hashedPassword = this.hashPassword(password);
-
-        // create user
-        const newUser = await User.create({
-            name,
-            email,
-            password: hashedPassword
-        });
-
-        // ✅ create general settings row with defaults
-        // cycle_start_day is null until user adds their first income
-        await GeneralSettings.create(newUser.UserID);
-
-        // Create savings settings with the same defaults shown in the frontend.
-        await SavingsSettings.create({
-            userId: newUser.UserID,
-            savings_percentage: 20,
-            lock_duration_months: 3,
-        });
-
-        // ✅ create first month with default cycle (day 1 until first income sets it)
-        const now = new Date();
-        const { calculateCycle } = require('../helpers/cycleCalculator');
-        const cycle = calculateCycle(1, now); // default cycle_start_day = 1
-
-        await Month.create({
-            userId: newUser.UserID,
-            year: cycle.record_year,
-            month: cycle.record_month,
-            cycle_start_date: cycle.cycle_start_date,
-            cycle_end_date: cycle.cycle_end_date
-        });
-
-        // generate token
-        const token = this.generateToken({
-            id: newUser.UserID,
-            email: newUser.Email
-        });
-
-        return {
-            user: {
-                UserID: newUser.UserID,
-                FullName: newUser.FullName,
-                Email: newUser.Email
-            },
-            token
-        };
-
-    } catch (error) {
-        throw error;
+        } catch (error) {
+            throw error;
+        }
     }
-}
 
     // User login service
     static async login(email, password) {
@@ -219,15 +136,15 @@ static async register(userData) {
 
             // Generate token
             const token = this.generateToken({
-                id: user.UserID, 
-                email: user.Email
+                id: user.userId, 
+                email: user.email
             });
 
             return {
                 user: {
-                    UserID: user.UserID,
-                    FullName: user.FullName,
-                    Email: user.Email,
+                    userId: user.userId,
+                    username: user.username,
+                    email: user.email,
                     created_at: user.created_at
                 },
                 token
@@ -331,7 +248,7 @@ static async register(userData) {
             const hashedNewPassword = this.hashPassword(newPassword);
 
             // Update password
-            const passwordUpdated = await User.updatePassword(user.UserID, hashedNewPassword);
+            const passwordUpdated = await User.updatePassword(user.userId, hashedNewPassword);
             if (!passwordUpdated) {
                 throw new Error("Failed to update password");
             }
