@@ -2,10 +2,9 @@
 // request field caused it. The controller sends AppErrors to the client as-is.
 // Anything that is NOT an AppError is treated as an unexpected failure (500).
 class AppError extends Error {
-    status: number;
-    field?: string;
+   
 
-    constructor(message: string, status: number = 400, field?: string) {
+    constructor(message, status = 400, field) {
         super(message);
         this.name = 'AppError';
         this.status = status;
